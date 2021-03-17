@@ -1,5 +1,5 @@
 import numpy as np
-
+import pandas as pd
 
 def calculate_soil_water(**kwargs):
     model = SoilWaterBalance(**kwargs)
@@ -42,7 +42,6 @@ class SoilWaterBalance(object):
         self.timeseries = kwargs["timeseries"]
         self.theta_init = kwargs["theta_init"]
         self.mif = kwargs["mif"]
-
         self.taw = (self.theta_fc - self.theta_wp) * self.zr * self.zr_factor
         self.raw = self.p * self.taw
 
@@ -55,21 +54,25 @@ class SoilWaterBalance(object):
 
         # Loop and perform the calculation
         theta_prev = self.theta_init
-        dr_prev = self.dr_from_theta(theta_prev)
-        for date in self.timeseries.index:
+        for nt, date in enumerate(self.timeseries.index):
+
+            if nt == 0:
+                dr_prev = self.dr_from_theta(theta_prev,date)
+
             row = self.timeseries.loc[date]
-            ks = self.ks(dr_prev)
-            dr_without_irrig = self.dr_without_irrig(dr_prev, theta_prev, ks, row)
+            ks = self.ks(dr_prev,date)
+
+            dr_without_irrig = self.dr_without_irrig(dr_prev, theta_prev, ks, row, date)
 
             ani = row["actual_net_irrigation"]
             auto_apply_irrigation = type(ani) == np.bool_ and ani
             assumed_net_irrigation = 0 if auto_apply_irrigation else ani
             dr = dr_without_irrig - assumed_net_irrigation
-            recommended_net_irrigation = dr * self.mif if dr > self.raw else 0
-            if auto_apply_irrigation and dr_without_irrig > self.raw:
+            recommended_net_irrigation = dr * self.mif if dr > self.raw.loc[date].values[0] else 0
+            if auto_apply_irrigation and dr_without_irrig > self.raw.loc[date].values[0]:
                 dr = dr_without_irrig - recommended_net_irrigation
 
-            theta = self.theta_from_dr(dr)
+            theta = self.theta_from_dr(dr,date)
             self.timeseries.at[date, "dr"] = dr
             self.timeseries.at[date, "theta"] = theta
             self.timeseries.at[date, "ks"] = ks
@@ -79,40 +82,44 @@ class SoilWaterBalance(object):
             theta_prev = theta
             dr_prev = dr
 
-    def dr_from_theta(self, theta):
-        return (self.theta_fc - theta) * self.zr * self.zr_factor
+    def dr_from_theta(self, theta, date):
+        return (self.theta_fc - theta) * self.zr.loc[date][0] * self.zr_factor
 
-    def theta_from_dr(self, dr):
-        return self.theta_fc - dr / (self.zr * self.zr_factor)
+    def theta_from_dr(self, dr, date):
+        return self.theta_fc - dr / (self.zr.loc[date][0] * self.zr_factor)
 
-    def ks(self, dr):
-        result = (self.taw - dr) / ((1 - self.p) * self.taw)
+    def ks(self, dr,date):
+        result=((self.taw.loc[date].values[0] - dr) /
+                ((1 - self.p.loc[date].values[0]) *
+                 self.taw.loc[date].values[0]))
         return min(result, 1)
 
-    def ro(self, effective_precipitation, theta_prev):
+    def ro(self, effective_precipitation, theta_prev, date):
         result = (
             effective_precipitation
-            + (theta_prev - self.theta_s) * self.zr * self.zr_factor
+            + (theta_prev - self.theta_s) * self.zr.loc[date].values[0]
+            * self.zr_factor
         )
-        return max(result, 0)
+        return max(result,0)
 
-    def dp(self, theta_prev, peff):
+    def dp(self, theta_prev, peff, date):
         theta = min(theta_prev, self.theta_s)
-        theta_mm = theta * self.zr * self.zr_factor
-        theta_fc_mm = self.theta_fc * self.zr * self.zr_factor
+        theta_mm = theta * self.zr.loc[date].values[0] * self.zr_factor
+        theta_fc_mm = self.theta_fc * self.zr.loc[date].values[0] * self.zr_factor
         excess_water = theta_mm - theta_fc_mm + peff
         return max(excess_water, 0) / self.draintime
 
-    def dr_without_irrig(self, dr_prev, theta_prev, ks, row):
+    def dr_without_irrig(self, dr_prev, theta_prev, ks, row,date):
         # "row" is a single row from self.timeseries
+
         result = (
             dr_prev
             - (
                 row["effective_precipitation"]
-                - self.ro(row["effective_precipitation"], theta_prev)
+                - self.ro(row["effective_precipitation"], theta_prev, date)
             )
             + row["crop_evapotranspiration"] * ks
-            + self.dp(theta_prev, row["effective_precipitation"])
+            + self.dp(theta_prev, row["effective_precipitation"], date)
         )
-        result = min(result, self.taw)
-        return result
+        return min(result, self.taw.loc[date].values[0])
+
